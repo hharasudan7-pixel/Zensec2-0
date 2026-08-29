@@ -33,21 +33,41 @@ export default function IncidentsPage() {
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-lg font-semibold text-white">Incident Queue</h2>
             <div className="flex gap-2">
-              <button className="p-1.5 text-zinc-400 hover:text-white bg-[#09090b] rounded border border-[#27272a]"><Filter className="w-4 h-4" /></button>
+              <button
+                aria-label="Filter incidents"
+                className="p-1.5 text-zinc-400 hover:text-white bg-[#09090b] rounded border border-[#27272a]"
+              >
+                <Filter className="w-4 h-4" aria-hidden="true" />
+              </button>
             </div>
           </div>
           <div className="relative">
-            <Search className="w-4 h-4 text-zinc-500 absolute left-3 top-2.5" />
-            <input type="text" placeholder="Search incidents..." className="w-full bg-[#09090b] border border-[#27272a] rounded-lg py-2 pl-9 pr-4 text-sm text-zinc-200 focus:border-indigo-500 outline-none" />
+            <Search className="w-4 h-4 text-zinc-500 absolute left-3 top-2.5" aria-hidden="true" />
+            <input
+              type="text"
+              placeholder="Search incidents..."
+              aria-label="Search incidents"
+              className="w-full bg-[#09090b] border border-[#27272a] rounded-lg py-2 pl-9 pr-4 text-sm text-zinc-200 focus:border-indigo-500 outline-none"
+            />
           </div>
         </div>
         <div className="flex-1 overflow-y-auto p-2 space-y-2">
           {incidents.map((inc) => (
             <div
               key={inc.id}
+              role="button"
+              tabIndex={0}
+              aria-pressed={selectedIncident.id === inc.id}
+              aria-label={`Incident ${inc.id}: ${inc.title}, severity ${inc.severity}`}
               onClick={() => setSelectedIncident(inc)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  setSelectedIncident(inc);
+                }
+              }}
               className={cn(
-                "p-3 rounded-lg border cursor-pointer transition-colors",
+                "p-3 rounded-lg border cursor-pointer transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1 focus:ring-offset-[#09090b]",
                 selectedIncident.id === inc.id ? "bg-[#18181b] border-indigo-500/50" : "bg-[#09090b]/50 border-transparent hover:border-[#27272a]"
               )}
             >
