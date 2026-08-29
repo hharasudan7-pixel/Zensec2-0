@@ -26,6 +26,7 @@ export function ResponseDrawer({ incident, isOpen, onClose, onContained }: { inc
   const [step, setStep] = useState<'SELECT' | 'CONFIRM' | 'EXECUTING' | 'RESULT'>('SELECT');
   const [execResults, setExecResults] = useState<any[]>([]);
   const [auditLog, setAuditLog] = useState<any[]>([]);
+  const [execError, setExecError] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
@@ -35,14 +36,21 @@ export function ResponseDrawer({ incident, isOpen, onClose, onContained }: { inc
 
   const handleExecute = async () => {
     setStep('EXECUTING');
-    
-    // Simulate API call to backend
+    setExecError(null);
+
+    // AbortController gives a hard 15-second cap so the UI never hangs
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15_000);
+
     try {
       const payload = {
         incident_id: incident.id,
         actions: selectedActions.map(id => ({
           action_id: id,
-          target: recommendedActions.find(a => a.id === id)?.target.replace('Inv_User', incident.user).replace('Affected_Asset', incident.asset).replace('Source_IP', incident.ip)
+          target: recommendedActions.find(a => a.id === id)?.target
+            .replace('Inv_User', incident.user)
+            .replace('Affected_Asset', incident.asset)
+            .replace('Source_IP', incident.ip)
         })),
         analyst_id: "sec-admin-01"
       };
@@ -50,30 +58,46 @@ export function ResponseDrawer({ incident, isOpen, onClose, onContained }: { inc
       const res = await fetch('http://localhost:8000/api/v1/incidents/' + incident.id + '/response-actions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: controller.signal,
       });
-      
+      clearTimeout(timeoutId);
+
+      if (!res.ok) {
+        // Surface HTTP-level errors as a readable message (B2 fix)
+        let detail = `Backend returned HTTP ${res.status}`;
+        try { const e = await res.json(); if (e?.detail) detail = e.detail; } catch { /* ignore */ }
+        throw new Error(detail);
+      }
+
       const data = await res.json();
       setExecResults(data.results);
-      
+
       const newLogs = data.results.map((r: any) => ({
         id: Math.random().toString(),
         incidentId: incident.id,
         action: recommendedActions.find(a => a.id === r.action_id)?.name,
-        target: recommendedActions.find(a => a.id === r.action_id)?.target.replace('Inv_User', incident.user).replace('Affected_Asset', incident.asset).replace('Source_IP', incident.ip),
+        target: recommendedActions.find(a => a.id === r.action_id)?.target
+          .replace('Inv_User', incident.user)
+          .replace('Affected_Asset', incident.asset)
+          .replace('Source_IP', incident.ip),
         analyst: 'sec-admin-01',
         timestamp: new Date().toISOString(),
         status: r.status,
         reason: r.reason
       }));
       setAuditLog(prev => [...prev, ...newLogs]);
-      
       setStep('RESULT');
-      if (data.status === 'Contained') {
-        onContained();
-      }
-    } catch (err) {
-      console.error(err);
+      if (data.status === 'Contained') onContained();
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      const isTimeout = err?.name === 'AbortError';
+      // B2 fix: store the error message and flip to RESULT to show it
+      setExecError(
+        isTimeout
+          ? '⚠️ Request timed out after 15 seconds. Backend may be slow or unreachable.'
+          : `⚠️ ${err?.message ?? 'Failed to reach backend. Is uvicorn running on port 8000?'}`
+      );
       setStep('RESULT');
     }
   };
@@ -106,8 +130,12 @@ export function ResponseDrawer({ incident, isOpen, onClose, onContained }: { inc
                 </h2>
                 <p className="text-sm text-zinc-400 mt-1">{incident.title}</p>
               </div>
-              <button onClick={onClose} className="p-2 text-zinc-400 hover:text-white rounded-md hover:bg-[#27272a] transition">
-                <X className="w-5 h-5" />
+              <button
+                onClick={onClose}
+                aria-label="Close action panel"
+                className="p-2 text-zinc-400 hover:text-white rounded-md hover:bg-[#27272a] transition"
+              >
+                <X className="w-5 h-5" aria-hidden="true" />
               </button>
             </div>
 
@@ -213,8 +241,19 @@ export function ResponseDrawer({ incident, isOpen, onClose, onContained }: { inc
 
               {step === 'RESULT' && (
                 <div className="animate-in fade-in slide-in-from-right-4 duration-300 space-y-6">
-                  <div>
-                    <h3 className="text-md font-semibold text-white mb-3">Execution Verification</h3>
+                  {/* B2 fix: show a visible error banner when the fetch failed */}
+                  {execError && (
+                    <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg flex items-start gap-3">
+                      <span className="text-red-400 text-lg mt-0.5" aria-hidden="true">⚠</span>
+                      <div>
+                        <p className="text-sm font-semibold text-red-400">Execution Failed</p>
+                        <p className="text-xs text-red-300 mt-1">{execError}</p>
+                      </div>
+                    </div>
+                  )}
+                  {execResults.length > 0 && (
+                    <div>
+                      <h3 className="text-md font-semibold text-white mb-3">Execution Verification</h3>
                     <div className="space-y-2">
                       {execResults.map(r => {
                         const details = getActionDetails(r.action_id);
@@ -236,8 +275,9 @@ export function ResponseDrawer({ incident, isOpen, onClose, onContained }: { inc
                         );
                       })}
                     </div>
-                  </div>
-                  
+                    </div>
+                  )}
+
                   <div>
                     <h3 className="text-md font-semibold text-white mb-3 flex items-center gap-2"><Shield className="w-4 h-4"/> Audit Log</h3>
                     <div className="bg-[#09090b] border border-[#27272a] rounded-lg overflow-hidden">
@@ -287,7 +327,7 @@ export function ResponseDrawer({ incident, isOpen, onClose, onContained }: { inc
                   onClick={handleExecute}
                   className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-lg transition flex items-center gap-2"
                 >
-                  <Send className="w-4 h-4" /> Conform & Execute
+                  <Send className="w-4 h-4" aria-hidden="true" /> Confirm &amp; Execute
                 </button>
               )}
             </div>

@@ -1,8 +1,13 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send, Bot, ShieldAlert, CheckCircle2, ChevronRight, Lock, UserX, Volume2, VolumeX } from 'lucide-react';
 import { cn } from '@/lib/utils';
+
+// Number of recent message turns (user + assistant pairs) to send to the
+// backend as context on each request. Keeps prompts bounded without losing
+// recent conversation continuity.
+const MAX_CLIENT_HISTORY_TURNS = 6;
 
 export function CopilotPanel() {
   const [messages, setMessages] = useState([
@@ -44,7 +49,7 @@ export function CopilotPanel() {
     // Speak first initial message if desired (User might have to interact first depending on browser policy)
   }, []);
 
-  const handleSend = (textInput?: string, e?: React.FormEvent) => {
+  const handleSend = async (textInput?: string, e?: React.FormEvent) => {
     e?.preventDefault();
     const query = typeof textInput === 'string' ? textInput : input;
     if (!query.trim()) return;
@@ -55,28 +60,60 @@ export function CopilotPanel() {
       window.speechSynthesis.speak(unlockUtterance);
     }
 
+    // Snapshot recent history BEFORE appending the new user message, so the
+    // backend sees turns leading up to (but not including) the current question.
+    const recentHistory = messages
+      .slice(-(MAX_CLIENT_HISTORY_TURNS * 2))
+      .map(m => ({ role: m.role, content: m.content }));
+
     setMessages(prev => [...prev, { role: 'user', content: query }]);
     setInput('');
     setIsTyping(true);
 
-    setTimeout(() => {
-      setIsTyping(false);
+    // AbortController gives us a hard 28-second cap so the UI never hangs
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 28_000);
 
-      let detailedResponse = "Based on the RAG context from the event logs and MITRE ATT&CK database, this matches T1078, Valid Accounts. I strongly recommend immediate quarantine of Prod-DB-01, blocking the suspicious IP, and revoking all current sessions for the root user. Should I execute this action?";
-      if (query.toLowerCase().includes('isolate')) {
-        detailedResponse = "I have queued the isolation playbook for App-Server-Web. Please navigate to the Incident Management page to confirm the execution of this containment action.";
-      } else if (query.toLowerCase().includes('timeline')) {
-        detailedResponse = "The attack initiated 15 minutes ago with external reconnaissance. 3 minutes ago, brute force authentication began, resulting in a successful ingress and subsequent 4.2 Gigabyte data exfiltration.";
+    try {
+      const res = await fetch("http://localhost:8000/api/v1/copilot/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          incident: { id: "INC-7842", asset: "Prod-DB-01", user: "root", ip: "unknown" },
+          question: query,
+          history: recentHistory,   // ← send bounded conversation context
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (!res.ok) {
+        // Surface HTTP errors (429 rate-limit, 502, 504, etc.) as readable messages
+        let detail = `Backend returned HTTP ${res.status}`;
+        try {
+          const errBody = await res.json();
+          if (errBody?.detail) detail = errBody.detail;
+        } catch { /* ignore parse errors */ }
+        // For 429, prepend a clock icon so it's visually distinct
+        if (res.status === 429) detail = `⏳ ${detail}`;
+        throw new Error(detail);
       }
 
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        content: detailedResponse
-      }]);
-
-      // Trigger speaking the response
-      speakText(detailedResponse);
-    }, 1200);
+      const data = await res.json();
+      setIsTyping(false);
+      setMessages(prev => [...prev, { role: 'assistant', content: data.answer }]);
+      speakText(data.answer);
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      setIsTyping(false);
+      const isTimeout = err?.name === 'AbortError';
+      const errorMsg = isTimeout
+        ? '⚠️ Request timed out after 28 seconds. The backend may be slow or unreachable.'
+        : `⚠️ ${err?.message ?? 'Failed to reach copilot service. Is the backend running on port 8000?'}`;
+      setMessages(prev => [...prev, { role: 'assistant', content: errorMsg }]);
+    }
   };
 
   return (
@@ -104,7 +141,13 @@ export function CopilotPanel() {
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-[300px]">
+      {/* role=log + aria-live ensures new messages are announced to screen readers (B8) */}
+      <div
+        role="log"
+        aria-live="polite"
+        aria-label="Chat history"
+        className="flex-1 overflow-y-auto p-4 space-y-4 min-h-[300px]"
+      >
         <AnimatePresence>
           {messages.map((msg, i) => (
             <motion.div
@@ -142,12 +185,23 @@ export function CopilotPanel() {
             </motion.div>
           ))}
           {isTyping && (
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex gap-3">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="flex gap-3"
+              aria-label="ZentraSec Copilot is analyzing incident telemetry"
+              role="status"
+            >
               <div className="w-6 h-6 rounded-md bg-indigo-500/20 flex items-center justify-center">
-                <Bot className="w-3 h-3 text-indigo-400" />
+                <Bot className="w-3 h-3 text-indigo-400 animate-pulse" />
               </div>
-              <div className="px-3 py-2 rounded-lg bg-indigo-500/10 border border-indigo-500/20 text-zinc-400 text-sm flex gap-1 items-center">
-                <span className="animate-bounce">.</span><span className="animate-bounce delay-75">.</span><span className="animate-bounce delay-150">.</span>
+              <div className="px-3 py-2 rounded-lg bg-indigo-500/10 border border-indigo-500/20 text-zinc-300 text-xs flex items-center gap-2.5">
+                <div className="flex gap-1 items-center">
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce"></span>
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce [animation-delay:0.2s]"></span>
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce [animation-delay:0.4s]"></span>
+                </div>
+                <span className="text-zinc-400 text-[11px] font-medium tracking-tight">Analyzing incident & synthesizing security recommendations...</span>
               </div>
             </motion.div>
           )}
@@ -166,9 +220,10 @@ export function CopilotPanel() {
           <button
             type="submit"
             disabled={!input.trim()}
+            aria-label="Send message"
             className="absolute right-2 top-2 p-1 text-zinc-400 hover:text-indigo-400 disabled:opacity-50 transition-colors"
           >
-            <Send className="w-4 h-4" />
+            <Send className="w-4 h-4" aria-hidden="true" />
           </button>
         </form>
         <div className="mt-2 text-center flex items-center justify-center gap-2">
