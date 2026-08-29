@@ -28,6 +28,8 @@ class EventIngestRequest(BaseModel):
     authentication_status: Optional[str] = None
     location: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    connection_id: Optional[str] = None
+    website_url: Optional[str] = None
 
 
 class ThreatIntelLookupRequest(BaseModel):
@@ -57,3 +59,18 @@ class ActionApprovalRequest(BaseModel):
 class ActionExecuteRequest(BaseModel):
     analyst_id: str
     target: Optional[str] = None
+
+
+class WebsiteConnectionCreate(BaseModel):
+    website_url: str
+    customer_name: str
+
+
+class WebsiteConnectionResponse(BaseModel):
+    connection_id: str
+    website_url: str
+    customer_name: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

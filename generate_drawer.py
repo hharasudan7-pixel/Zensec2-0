@@ -291,7 +291,7 @@ export function ResponseDrawer({ incident, isOpen, onClose, onContained }: { inc
                   onClick={handleExecute}
                   className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-lg transition flex items-center gap-2"
                 >
-                  <Send className="w-4 h-4" /> Conform & Execute
+                  <Send className="w-4 h-4" /> Confirm & Execute
                 </button>
               )}
             </div>

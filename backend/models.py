@@ -17,6 +17,16 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class WebsiteConnection(Base):
+    __tablename__ = "website_connections"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    connection_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    website_url: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    customer_name: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class SecurityEvent(Base):
     __tablename__ = "security_events"
 
@@ -33,6 +43,7 @@ class SecurityEvent(Base):
     location: Mapped[Optional[str]] = mapped_column(String(128))
     anomaly_score: Mapped[Optional[float]] = mapped_column(Float)
     anomaly_classification: Mapped[Optional[str]] = mapped_column(String(32))
+    connection_id: Mapped[Optional[str]] = mapped_column(String(64), index=True)
     correlation_id: Mapped[Optional[str]] = mapped_column(String(64), index=True)
     threat_indicators: Mapped[Optional[dict]] = mapped_column(JSON, default=list)
     metadata_json: Mapped[Optional[dict]] = mapped_column("metadata", JSON, default=dict)
@@ -76,6 +87,7 @@ class Incident(Base):
     source_ip: Mapped[Optional[str]] = mapped_column(String(64))
     asset: Mapped[Optional[str]] = mapped_column(String(128))
     threat_intel_status: Mapped[str] = mapped_column(String(64), default="none")
+    connection_id: Mapped[Optional[str]] = mapped_column(String(64), index=True)
     copilot_summary: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
     response_status: Mapped[str] = mapped_column(String(32), default="open")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
