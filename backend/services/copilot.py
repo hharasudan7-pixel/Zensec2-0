@@ -1,7 +1,6 @@
 import os
 import time
 import logging
-import google.generativeai as genai
 
 logger = logging.getLogger("zentrasec.copilot")
 
@@ -13,6 +12,8 @@ SYSTEM_INSTRUCTION = """You are ZentraSec's AI Incident Copilot, a SOC (Security
 assistant. You explain security incidents clearly, reference relevant MITRE ATT&CK techniques when 
 applicable, and recommend concrete response actions. Keep responses concise (3-5 sentences) and 
 professional, matching a cybersecurity analyst's tone."""
+
+import google.generativeai as genai
 
 # Google Gemini client initialization
 # Uses GOOGLE_API_KEY from environment
