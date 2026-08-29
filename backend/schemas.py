@@ -35,8 +35,8 @@ class ThreatIntelLookupRequest(BaseModel):
     indicator_type: str
 
 
-class CopilotRequest(BaseModel):
-    question: Optional[str] = None
+# CopilotRequest was removed — it duplicated (and diverged from) the
+# authoritative CopilotRequest defined directly in main.py.
 
 
 class ResponseActionItem(BaseModel):
