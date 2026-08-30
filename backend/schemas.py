@@ -68,6 +68,7 @@ class WebsiteConnectionCreate(BaseModel):
 
 class WebsiteConnectionResponse(BaseModel):
     connection_id: str
+    secure_token: Optional[str] = None
     website_url: str
     customer_name: str
     created_at: datetime

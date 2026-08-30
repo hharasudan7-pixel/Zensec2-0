@@ -23,13 +23,14 @@ logger = logging.getLogger("zentrasec")
 from database import get_db, engine
 from schemas import EventIngestRequest, WebsiteConnectionCreate, WebsiteConnectionResponse
 from services.correlation import CorrelationEngine
+from services.rules_engine import classify_risk
 import models
 
 inspector = sqlalchemy.inspect(engine)
 if inspector.has_table("security_events"):
     columns = [col['name'] for col in inspector.get_columns("security_events")]
-    if "connection_id" not in columns:
-        print("Schema changed (connection_id missing). Recreating database...")
+    if "connection_id" not in columns or "secure_token" not in columns:
+        print("Schema changed (connection/secure_token columns missing). Recreating database...")
         models.Base.metadata.drop_all(bind=engine)
 
 models.Base.metadata.create_all(bind=engine)
@@ -53,10 +54,7 @@ app = FastAPI(title="ZentraSec API", description="AI-Powered Cybersecurity APIs"
 # ---------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -182,11 +180,112 @@ async def copilot_chat(request: CopilotRequest):
 def read_root():
     return {"status": "ZentraSec Backend Running", "modules": ["ML Anomaly Detection", "RAG Copilot", "Event Correlation"]}
 
+ENRICHMENT_EVENT_TYPES = {"LOGIN_FAILURE", "LOGIN_FAILED", "LOGIN_SUCCESS",
+                          "PRIVILEGE_ACCESS", "PRIVILEGE_ESCALATION",
+                          "LARGE_FILE_DOWNLOAD", "DATA_EXPORT"}
+
+
+async def generate_ai_explanation(enriched: dict):
+    """Task 2.5 - trigger the Gemini AI Copilot dynamically when a correlated
+    fault is detected, then broadcast the explanation over WebSocket.
+    Falls back to the structured summary if Gemini errors/times out.
+    """
+    fault = enriched.get("fault_description") or {}
+    incident_ctx = {
+        "id": enriched.get("event_id"),
+        "title": ", ".join(fault.get("detections", [])) or "Anomaly detected",
+        "description": fault.get("summary", ""),
+        "severity": enriched.get("risk_band"),
+        "risk_score": enriched.get("anomaly_score"),
+        "user_id": enriched.get("user_id"),
+        "source_ip": enriched.get("source_ip"),
+        "event_type": enriched.get("event_type"),
+    }
+    question = (
+        "Explain this correlated security fault concisely for a SOC analyst: "
+        "what happened, why it is dangerous, and the recommended response actions."
+    )
+    loop = asyncio.get_event_loop()
+    try:
+        answer = await asyncio.wait_for(
+            loop.run_in_executor(None, get_copilot_response, incident_ctx, question, []),
+            timeout=COPILOT_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        logger.warning("[AI Copilot] fallback used: %s", exc)
+        answer = generate_fallback_summary(incident_ctx)
+
+    await manager.broadcast(
+        {
+            "type": "FAULT_EXPLANATION",
+            "timestamp": datetime.utcnow().isoformat(),
+            "connection_id": enriched.get("connection_id"),
+            "event_id": enriched.get("event_id"),
+            "detections": fault.get("detections", []),
+            "affected_user": enriched.get("user_id"),
+            "source_ip": enriched.get("source_ip"),
+            "risk_band": enriched.get("risk_band"),
+            "explanation": answer,
+            "recommended_actions": [
+                "Verify recent login activity for the affected account",
+                "Force password reset and revoke active sessions",
+                "Block or rate-limit the source IP at the edge firewall",
+                "Review privilege changes and recent large downloads",
+            ],
+        },
+        enriched.get("connection_id"),
+    )
+
+
 @app.post("/api/v1/events")
-def ingest_event(request: EventIngestRequest, db: Session = Depends(get_db)):
+async def ingest_event(request: EventIngestRequest, http_request: Request, db: Session = Depends(get_db)):
+    # 2.1 - extract the ACTUAL client IP from the socket, never trust the payload
+    client_ip = http_request.client.host if http_request.client else request.source_ip
+    xff = http_request.headers.get("x-forwarded-for")
+    if xff:
+        client_ip = xff.split(",")[0].strip()
+
     engine = CorrelationEngine(db)
-    event = engine.process_event(request)
-    return {"status": "success", "event_id": event.event_id}
+    event = engine.process_event(request, client_ip=client_ip)
+
+    rules = getattr(event, "rules_result", None) or {
+        "score": event.anomaly_score or 0,
+        "risk_band": classify_risk(event.anomaly_score or 0),
+        "detections": [],
+        "fault_description": None,
+    }
+
+    # 2.2 - real-time risk scoring with demo risk bands
+    enriched = {
+        "type": "SECURITY_EVENT",
+        "event_id": event.event_id,
+        "connection_id": event.connection_id,
+        "timestamp": event.timestamp.isoformat() if event.timestamp else datetime.utcnow().isoformat(),
+        "event_type": event.event_type,
+        "user_id": event.user_id,
+        "source_ip": event.source_ip,
+        "authentication_status": event.authentication_status,
+        "anomaly_score": float(event.anomaly_score or 0.0),
+        "risk_band": rules.get("risk_band", classify_risk(float(event.anomaly_score or 0.0))),
+        "detections": rules.get("detections", []),
+        "fault_description": rules.get("fault_description"),
+        "metadata": request.metadata,
+    }
+
+    # 3.1 - stream the fully enriched event to the SOC dashboard
+    await manager.broadcast(enriched, event.connection_id)
+
+    # 2.5 - trigger AI Copilot dynamically for correlated faults
+    if enriched["fault_description"]:
+        asyncio.create_task(generate_ai_explanation(enriched))
+
+    return {
+        "status": "success",
+        "event_id": event.event_id,
+        "anomaly_score": enriched["anomaly_score"],
+        "risk_band": enriched["risk_band"],
+        "detections": enriched["detections"],
+    }
 
 @app.post("/api/v1/simulate/timeline")
 def simulate_timeline(db: Session = Depends(get_db)):
@@ -306,12 +405,20 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+import secrets
+import string
+
 @app.post("/api/v1/connections", response_model=WebsiteConnectionResponse)
 def create_connection(conn: WebsiteConnectionCreate, db: Session = Depends(get_db)):
+    random_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+    new_connection_id = f"INC-{random_id}"
+    new_token = secrets.token_hex(32)
+
     db_conn = models.WebsiteConnection(
-        connection_id=conn.connection_id,
+        connection_id=new_connection_id,
+        secure_token=new_token,
         website_url=conn.website_url,
-        customer_name="Unknown"
+        customer_name=conn.customer_name
     )
     db.add(db_conn)
     db.commit()

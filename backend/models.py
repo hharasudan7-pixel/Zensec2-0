@@ -22,6 +22,7 @@ class WebsiteConnection(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     connection_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    secure_token: Mapped[Optional[str]] = mapped_column(String(255))
     website_url: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     customer_name: Mapped[str] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

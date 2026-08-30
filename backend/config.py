@@ -20,10 +20,12 @@ class Settings(BaseSettings):
     seed_demo_data: bool = True
     default_analyst_username: str = "analyst"
     default_analyst_password: str = "analyst123"
+    google_api_key: str = ""
 
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"
 
     @property
     def cors_origins(self) -> List[str]:

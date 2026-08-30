@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from models import SecurityEvent, Incident, IncidentEvent, AttackTimeline, WebsiteConnection
 from schemas import EventIngestRequest
 from services.anomaly_detection import AnomalyDetectionService
+from services.rules_engine import RulesEngine
 
 anomaly_service = AnomalyDetectionService()
 
@@ -39,10 +40,12 @@ class CorrelationEngine:
     def __init__(self, db: Session):
         self.db = db
 
-    def process_event(self, request: EventIngestRequest) -> SecurityEvent:
+    def process_event(self, request: EventIngestRequest, client_ip=None) -> SecurityEvent:
         event_id = request.event_id or f"EVT-{uuid.uuid4().hex[:8]}"
         now = datetime.utcnow()
         timestamp = request.timestamp or now
+        # 2.1 - real client IP (from request.client.host) wins over spoofable payload value
+        effective_ip = client_ip or request.source_ip
 
         # Connection ID lookup or registration
         connection_id = request.connection_id
@@ -93,14 +96,23 @@ class CorrelationEngine:
 
         event_dict = request.model_dump()
         event_dict["timestamp"] = timestamp
-        
+        event_dict["source_ip"] = effective_ip
+
         score, classification, ml_status = anomaly_service.score_event(event_dict, context)
+
+        # Rules engine - brute force / correlation detections (tasks 2.3 & 2.4)
+        rules = RulesEngine(self.db).evaluate(
+            request.event_type, request.user_id, effective_ip, connection_id, timestamp
+        )
+        if rules["detections"]:
+            score = max(score, rules["score"])
+            classification = rules["risk_band"]
 
         sec_event = SecurityEvent(
             event_id=event_id,
             timestamp=timestamp,
             user_id=request.user_id,
-            source_ip=request.source_ip,
+            source_ip=effective_ip,
             destination=request.destination,
             device_id=request.device_id,
             event_type=request.event_type,
@@ -118,6 +130,7 @@ class CorrelationEngine:
         self.db.refresh(sec_event)
 
         self.correlate(sec_event)
+        sec_event.rules_result = rules  # transient attribute, not persisted
         return sec_event
 
     def correlate(self, new_event: SecurityEvent):
