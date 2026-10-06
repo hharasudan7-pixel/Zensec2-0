@@ -71,6 +71,7 @@ class WebsiteConnectionResponse(BaseModel):
     secure_token: Optional[str] = None
     website_url: str
     customer_name: str
+    status: str
     created_at: datetime
 
     class Config:

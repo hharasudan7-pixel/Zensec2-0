@@ -33,6 +33,12 @@ if inspector.has_table("security_events"):
         print("Schema changed (connection/secure_token columns missing). Recreating database...")
         models.Base.metadata.drop_all(bind=engine)
 
+if inspector.has_table("website_connections"):
+    columns = [col['name'] for col in inspector.get_columns("website_connections")]
+    if "status" not in columns:
+        print("Schema changed (status column missing in website_connections). Recreating database...")
+        models.Base.metadata.drop_all(bind=engine)
+
 models.Base.metadata.create_all(bind=engine)
 
 # Seed initial connection if none exists
@@ -54,7 +60,10 @@ app = FastAPI(title="ZentraSec API", description="AI-Powered Cybersecurity APIs"
 # ---------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -239,53 +248,76 @@ async def generate_ai_explanation(enriched: dict):
 
 @app.post("/api/v1/events")
 async def ingest_event(request: EventIngestRequest, http_request: Request, db: Session = Depends(get_db)):
-    # 2.1 - extract the ACTUAL client IP from the socket, never trust the payload
-    client_ip = http_request.client.host if http_request.client else request.source_ip
-    xff = http_request.headers.get("x-forwarded-for")
-    if xff:
-        client_ip = xff.split(",")[0].strip()
+    try:
+        # Extract actual client IP
+        client_ip = http_request.client.host if http_request.client else request.source_ip
+        xff = http_request.headers.get("x-forwarded-for")
+        if xff:
+            client_ip = xff.split(",")[0].strip()
 
-    engine = CorrelationEngine(db)
-    event = engine.process_event(request, client_ip=client_ip)
+        # Connection and token validation
+        connection_id = request.connection_id
+        auth_header = http_request.headers.get("authorization") or http_request.headers.get("Authorization")
+        token = None
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ", 1)[1]
+        from models import WebsiteConnection
+        db_conn = db.query(WebsiteConnection).filter(WebsiteConnection.connection_id == connection_id).first()
+        if not db_conn:
+            logger.warning("[ZENTRASEC] Unknown connection ID: %s", connection_id)
+            raise HTTPException(status_code=404, detail="Connection ID not found")
+        if not token or db_conn.secure_token != token:
+            logger.warning("[ZENTRASEC] Invalid token for connection %s", connection_id)
+            raise HTTPException(status_code=401, detail="Invalid secure token")
 
-    rules = getattr(event, "rules_result", None) or {
-        "score": event.anomaly_score or 0,
-        "risk_band": classify_risk(event.anomaly_score or 0),
-        "detections": [],
-        "fault_description": None,
-    }
+        # Log received event
+        logger.info("[ZENTRASEC EVENT RECEIVED] Connection ID: %s | Event Type: %s | Source IP: %s | Timestamp: %s",
+                    connection_id, request.event_type, client_ip, request.timestamp)
 
-    # 2.2 - real-time risk scoring with demo risk bands
-    enriched = {
-        "type": "SECURITY_EVENT",
-        "event_id": event.event_id,
-        "connection_id": event.connection_id,
-        "timestamp": event.timestamp.isoformat() if event.timestamp else datetime.utcnow().isoformat(),
-        "event_type": event.event_type,
-        "user_id": event.user_id,
-        "source_ip": event.source_ip,
-        "authentication_status": event.authentication_status,
-        "anomaly_score": float(event.anomaly_score or 0.0),
-        "risk_band": rules.get("risk_band", classify_risk(float(event.anomaly_score or 0.0))),
-        "detections": rules.get("detections", []),
-        "fault_description": rules.get("fault_description"),
-        "metadata": request.metadata,
-    }
+        engine = CorrelationEngine(db)
+        event = engine.process_event(request, client_ip=client_ip)
 
-    # 3.1 - stream the fully enriched event to the SOC dashboard
-    await manager.broadcast(enriched, event.connection_id)
+        rules = getattr(event, "rules_result", None) or {
+            "score": event.anomaly_score or 0,
+            "risk_band": classify_risk(event.anomaly_score or 0),
+            "detections": [],
+            "fault_description": None,
+        }
 
-    # 2.5 - trigger AI Copilot dynamically for correlated faults
-    if enriched["fault_description"]:
-        asyncio.create_task(generate_ai_explanation(enriched))
+        # 2.2 - real-time risk scoring with demo risk bands
+        enriched = {
+            "type": "SECURITY_EVENT",
+            "event_id": event.event_id,
+            "connection_id": event.connection_id,
+            "timestamp": event.timestamp.isoformat() if event.timestamp else datetime.utcnow().isoformat(),
+            "event_type": event.event_type,
+            "user_id": event.user_id,
+            "source_ip": event.source_ip,
+            "authentication_status": event.authentication_status,
+            "anomaly_score": float(event.anomaly_score or 0.0),
+            "risk_band": rules.get("risk_band", classify_risk(float(event.anomaly_score or 0.0))),
+            "detections": rules.get("detections", []),
+            "fault_description": rules.get("fault_description"),
+            "metadata": request.metadata,
+        }
 
-    return {
-        "status": "success",
-        "event_id": event.event_id,
-        "anomaly_score": enriched["anomaly_score"],
-        "risk_band": enriched["risk_band"],
-        "detections": enriched["detections"],
-    }
+        # 3.1 - stream the fully enriched event to the SOC dashboard
+        await manager.broadcast(enriched, event.connection_id)
+
+        # 2.5 - trigger AI Copilot dynamically for correlated faults
+        if enriched["fault_description"]:
+            asyncio.create_task(generate_ai_explanation(enriched))
+
+        return {
+            "status": "success",
+            "event_id": event.event_id,
+            "anomaly_score": enriched["anomaly_score"],
+            "risk_band": enriched["risk_band"],
+            "detections": enriched["detections"],
+        }
+    except Exception as e:
+        logger.exception("Error processing event ingestion")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @app.post("/api/v1/simulate/timeline")
 def simulate_timeline(db: Session = Depends(get_db)):
@@ -401,7 +433,10 @@ class ConnectionManager:
     async def broadcast(self, message: dict, connection_id: str):
         if connection_id in self.active_connections:
             for connection in self.active_connections[connection_id]:
-                await connection.send_json(message)
+                try:
+                    await connection.send_json(message)
+                except Exception as e:
+                    logger.warning(f"Failed to send to websocket: {e}")
 
 manager = ConnectionManager()
 
@@ -410,6 +445,9 @@ import string
 
 @app.post("/api/v1/connections", response_model=WebsiteConnectionResponse)
 def create_connection(conn: WebsiteConnectionCreate, db: Session = Depends(get_db)):
+    if not (conn.website_url.startswith("http://") or conn.website_url.startswith("https://")):
+        raise HTTPException(status_code=400, detail="Website URL must use http:// or https://")
+        
     random_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
     new_connection_id = f"INC-{random_id}"
     new_token = secrets.token_hex(32)
@@ -420,10 +458,14 @@ def create_connection(conn: WebsiteConnectionCreate, db: Session = Depends(get_d
         website_url=conn.website_url,
         customer_name=conn.customer_name
     )
-    db.add(db_conn)
-    db.commit()
-    db.refresh(db_conn)
-    return db_conn
+    try:
+        db.add(db_conn)
+        db.commit()
+        db.refresh(db_conn)
+        return db_conn
+    except sqlalchemy.exc.IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="This website is already connected.")
 
 @app.get("/api/v1/connections", response_model=List[WebsiteConnectionResponse])
 def get_connections(db: Session = Depends(get_db)):

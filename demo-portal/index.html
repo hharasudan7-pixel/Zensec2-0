@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>College Demo Portal</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; background: #f4f4f9; }
+        .panel { background: #fff; border: 1px solid #ddd; padding: 20px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1, h2 { color: #333; }
+        input, button { padding: 10px; margin: 5px 0; border: 1px solid #ccc; border-radius: 4px; }
+        button { background: #007bff; color: white; cursor: pointer; border: none; }
+        button:hover { background: #0056b3; }
+        .danger { background: #dc3545; }
+        .danger:hover { background: #a71d2a; }
+        .success { background: #28a745; }
+        .success:hover { background: #1e7e34; }
+    </style>
+</head>
+<body>
+    <h1>🎓 College Demo Portal</h1>
+    
+    <div class="panel" id="config-panel">
+        <h2>1. Configure ZentraSec SDK</h2>
+        <input type="text" id="apiUrl" value="http://localhost:8000" placeholder="API URL" style="width: 250px;">
+        <input type="text" id="connId" placeholder="Connection ID (e.g. INC-XXXX)" style="width: 200px;">
+        <input type="text" id="token" placeholder="Secure Token" style="width: 300px;">
+        <button onclick="initSDK()">Initialize SDK</button>
+        <p id="sdk-status" style="color: #666; font-weight: bold;">Status: Not initialized</p>
+    </div>
+
+    <div class="panel">
+        <h2>2. User Authentication</h2>
+        <form id="loginForm" onsubmit="handleLogin(event)">
+            <input type="text" id="username" placeholder="Username (e.g. admin)" required />
+            <br/><br/>
+            <input type="password" id="password" placeholder="Password" required />
+            <br/><br/>
+            <button type="submit" class="success">Login</button>
+        </form>
+        <div id="loginMessage" style="margin-top:10px;font-weight:bold;"></div>
+        <div id="postLoginActions" style="display:none;margin-top:10px;">
+            <button class="danger" onclick="handleAdminAccess()">Access Admin Panel (Privilege Escalation)</button>
+            <button class="danger" onclick="handleFileDownload()">Download Database (Data Exfiltration)</button>
+        </div>
+    </div>
+
+    <script src="ZentraSecConnector.js?v=2"></script>
+    <script>
+        let sdk = null;
+
+        function initSDK() {
+            const apiUrl = document.getElementById("apiUrl").value;
+            const connId = document.getElementById("connId").value;
+            const token = document.getElementById("token").value;
+            
+            if (!connId || !token) {
+                alert("Please provide Connection ID and Secure Token from the SOC Dashboard.");
+                return;
+            }
+            
+            sdk = new ZentraSecConnector(apiUrl, connId, token);
+            document.getElementById("sdk-status").innerText = "Status: Initialized and tracking activity.";
+            document.getElementById("sdk-status").style.color = "green";
+        }
+
+        function handleLogin(event) {
+            event.preventDefault();
+            if (!sdk) return alert("Initialize SDK first!");
+            const username = document.getElementById("username").value;
+            const password = document.getElementById("password").value;
+            // Simple demo authentication logic
+            const success = (username === "admin" && password === "admin123");
+            if (success) {
+                sdk.trackLoginSuccess(username).then(() => {
+                    document.getElementById("loginMessage").innerText = "Login successful";
+                    document.getElementById("postLoginActions").style.display = "block";
+                });
+            } else {
+                sdk.trackLoginFailure(username, null, "Invalid credentials").then(() => {
+                    document.getElementById("loginMessage").innerText = "Invalid credentials";
+                    document.getElementById("postLoginActions").style.display = "none";
+                });
+            }
+        }
+
+        function handleAdminAccess() {
+            if (!sdk) return alert("Initialize SDK first!");
+            sdk.trackPrivilegeAccess().then(() => {
+                alert("Admin panel accessed - event logged");
+            });
+        }
+
+        function handleFileDownload() {
+            if (!sdk) return alert("Initialize SDK first!");
+            const filename = "all_student_records_2026.zip";
+            sdk.trackFileDownload(filename).then(() => {
+                alert("File download event logged");
+            });
+        }
+    </script>
+</body>
+</html>

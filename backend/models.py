@@ -25,6 +25,7 @@ class WebsiteConnection(Base):
     secure_token: Mapped[Optional[str]] = mapped_column(String(255))
     website_url: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     customer_name: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(32), default="Registered")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

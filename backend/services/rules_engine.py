@@ -108,6 +108,8 @@ class RulesEngine:
 
         # ---- Build a fault description when any rule fires ----
         if detections:
+            user_id = event.user_id
+            source_ip = event.source_ip
             target = user_id or source_ip or "unknown"
             if "POTENTIAL_ACCOUNT_COMPROMISE" in detections:
                 summary = (
@@ -117,11 +119,11 @@ class RulesEngine:
             elif "SUSPICIOUS_AUTHENTICATION_SEQUENCE" in detections:
                 summary = (
                     f"Suspicious authentication sequence: successful login for '{target}' "
-                    f"immediately following {len(failures)} failed attempts from {source_ip}."
+                    f"immediately following {len(chain_failures)} failed attempts from {source_ip}."
                 )
             else:
                 summary = (
-                    f"Brute force pattern detected: {len(failures)} failed login attempts "
+                    f"Brute force pattern detected: {len(chain_failures)} failed login attempts "
                     f"against '{target}' from {source_ip} within "
                     f"{BRUTE_FORCE_WINDOW_MINUTES} minutes."
                 )

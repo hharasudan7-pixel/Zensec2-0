@@ -2,27 +2,40 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Activity, Lock, User, Clock, AlertTriangle, ShieldAlert, CheckCircle2, ChevronRight, Server, Globe, PowerOff } from 'lucide-react';
+import { Activity, Lock, ShieldAlert, Globe, PowerOff, Plus, AlertCircle, RefreshCw } from 'lucide-react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine, ReferenceArea, Area, ResponsiveContainer } from 'recharts';
 
 export default function AnalyticsPage() {
   const [connections, setConnections] = useState<any[]>([]);
   const [selectedConnection, setSelectedConnection] = useState<string>('');
   const [isConnected, setIsConnected] = useState(false);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [newConnData, setNewConnData] = useState({ website_url: '', customer_name: '' });
+  const [addConnError, setAddConnError] = useState<string>('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
   
-  const [flowEvents, setFlowEvents] = useState<any[]>([]);
-  const [metrics, setMetrics] = useState({ active_sessions: 0, traffic_rate: '0 req/s', threat_level: 'Low' });
-  const [hasAnomalies, setHasAnomalies] = useState(false);
+  // Real-time states
+  const [securityEvents, setSecurityEvents] = useState<any[]>([]);
+  const [chartData, setChartData] = useState<any[]>([]);
+  const [faultExplanation, setFaultExplanation] = useState<any>(null);
   
   const [blockTimer, setBlockTimer] = useState<number | null>(null);
-  
   const wsRef = useRef<WebSocket | null>(null);
+  const apiBase = process.env.NEXT_PUBLIC_API_BASE ?? 'http://127.0.0.1:8000';
+
+  const fetchConnections = async () => {
+  try {
+    const res = await fetch(`${apiBase}/api/v1/connections`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    setConnections(data);
+  } catch (err) {
+    console.error('Failed to load connections', err);
+  }
+};
 
   useEffect(() => {
-    // Fetch connections
-    fetch('http://localhost:8000/api/v1/connections')
-      .then(res => res.json())
-      .then(data => setConnections(data))
-      .catch(err => console.error("Failed to load connections", err));
+    fetchConnections();
   }, []);
 
   useEffect(() => {
@@ -35,27 +48,86 @@ export default function AnalyticsPage() {
     return () => clearInterval(timerId);
   }, [blockTimer]);
 
+  const handleAddConnection = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isSubmitting) return;
+    
+    setAddConnError('');
+    setIsSubmitting(true);
+
+    if (!newConnData.customer_name.trim() || !newConnData.website_url.trim()) {
+      setAddConnError("Customer Name and Website URL are required.");
+      setIsSubmitting(false);
+      return;
+    }
+    if (!/^https?:\/\//i.test(newConnData.website_url.trim())) {
+      setAddConnError("Website URL must start with http:// or https://");
+      setIsSubmitting(false);
+      return;
+    }
+
+    try {
+      const res = await fetch(`${apiBase}/api/v1/connections`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newConnData),
+        mode: 'cors', // ensure CORS request
+      });
+      if (res.ok) {
+        setShowAddModal(false);
+        setNewConnData({ website_url: '', customer_name: '' });
+        fetchConnections();
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        setAddConnError(errData.detail || "Failed to create connection.");
+      }
+    } catch (err) {
+      console.error("Failed to add connection", err);
+      setAddConnError("Network error: Backend is unavailable.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const handleConnect = () => {
     if (!selectedConnection) return;
-    
     setIsConnected(true);
-    setFlowEvents([]);
+    setSecurityEvents([]);
+    setChartData([]);
+    setFaultExplanation(null);
     
     if (wsRef.current) wsRef.current.close();
     
-    const ws = new WebSocket(`ws://localhost:8000/api/v1/ws/security-flow/${selectedConnection}`);
-    
+    console.log('[ZentraSec WS] Connecting to', `${apiBase.replace(/^http/, 'ws')}/api/v1/ws/security-flow/${selectedConnection}`);
+    const ws = new WebSocket(`${apiBase.replace(/^http/, 'ws')}/api/v1/ws/security-flow/${selectedConnection}`);
+
+    ws.onopen = () => {
+      console.log('[ZentraSec WS] Connected');
+    };
+    ws.onerror = (e) => {
+      console.error('[ZentraSec WS] Error', e);
+    };
+
     ws.onmessage = (event) => {
+      console.log('[ZentraSec WS] Message received:', event.data);
       const data = JSON.parse(event.data);
-      if (data.type === 'FLOW_UPDATE') {
-        setMetrics(data.metrics);
-        setFlowEvents(prev => [...data.events, ...prev].slice(0, 10)); // Keep last 10
-        
-        if (data.metrics.threat_level === 'Critical' || data.metrics.threat_level === 'High') {
-          setHasAnomalies(true);
-        } else {
-          setHasAnomalies(false);
-        }
+      const now = new Date();
+      const timeStr = now.toLocaleTimeString();
+
+      if (data.type === 'SECURITY_EVENT') {
+        setSecurityEvents(prev => [data, ...prev].slice(0, 50));
+        setChartData(prev => {
+          const newData = [...prev, { time: timeStr, score: data.anomaly_score, risk_band: data.risk_band }];
+          return newData.slice(-20); // Keep last 20 points
+        });
+      } else if (data.type === 'FAULT_EXPLANATION') {
+        setFaultExplanation(data);
+      } else if (data.type === 'FLOW_UPDATE' && chartData.length === 0) {
+        // Just feed some zeroes if no events so chart isn't empty
+        setChartData(prev => {
+           if (prev.length > 0) return prev;
+           return [{ time: timeStr, score: 0 }];
+        });
       }
     };
     
@@ -68,12 +140,10 @@ export default function AnalyticsPage() {
   };
 
   const handleBlockAccount = () => {
-    // Simulate hitting the suspend API
     setBlockTimer(420); // 7 minutes
-    
-    fetch(`http://localhost:8000/api/v1/incidents/SIMULATED/suspend-7min`, {
+    fetch(`${apiBase}/api/v1/incidents/SIMULATED/suspend-7min`, {
         method: 'POST'
-    }).catch(console.error);
+      }).catch(console.error);
   };
 
   const formatTimer = (seconds: number) => {
@@ -82,25 +152,71 @@ export default function AnalyticsPage() {
     return `${m}:${s.toString().padStart(2, '0')}`;
   };
 
+  // Risk color utilities for UI classes and chart hex colors
+const getRiskColor = (band: string) => {
+  switch (band) {
+    case 'CRITICAL': return 'text-red-500';
+    case 'HIGH': return 'text-orange-500';
+    case 'MEDIUM': return 'text-yellow-500';
+    case 'LOW': default: return 'text-emerald-500';
+  }
+};
+
+// Hex color values for chart styling
+const getRiskHex = (band: string) => {
+  switch (band) {
+    case 'CRITICAL': return '#ef4444';
+    case 'HIGH': return '#fb923c';
+    case 'MEDIUM': return '#fbbf24';
+    case 'LOW': default: return '#10b981';
+  }
+};
+
+// Background utilities for risk badges
+const getRiskBg = (band: string) => {
+  switch (band) {
+    case 'CRITICAL': return 'bg-red-500/20';
+    case 'HIGH': return 'bg-orange-500/20';
+    case 'MEDIUM': return 'bg-yellow-500/20';
+    case 'LOW': default: return 'bg-emerald-500/20';
+  }
+};
+
+// Custom dot component for chart points
+const CustomDot = (props: any) => {
+  const { cx, cy, payload } = props;
+  const color = getRiskHex(payload.risk_band || 'LOW');
+  return <circle cx={cx} cy={cy} r={4} fill={color} />;
+};
+
   return (
     <div className="p-6 md:p-8 space-y-8 min-h-full bg-zinc-950 text-white">
       {/* Header section */}
       <div className="flex flex-col space-y-2">
         <h1 className="text-3xl font-bold tracking-tight text-white flex items-center gap-3">
           <Activity className="text-emerald-400 w-8 h-8" />
-          Real-Time Security Flow Mapping
+          SOC Dashboard - Live Analytics
         </h1>
         <p className="text-zinc-400 text-lg">
-          Live Connection Monitoring & Threat Resolution
+          Real-time Event Correlation and Risk Analysis
         </p>
       </div>
 
       {/* Connection Section */}
       <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl p-6 shadow-xl backdrop-blur-sm">
-        <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
-          <Globe className="text-emerald-400" />
-          Customer Website Connection ID
-        </h2>
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="text-xl font-semibold flex items-center gap-2">
+            <Globe className="text-emerald-400" />
+            Website Telemetry Connection
+          </h2>
+          <button 
+            onClick={() => setShowAddModal(true)}
+            className="flex items-center gap-1 text-sm bg-zinc-800 hover:bg-zinc-700 px-3 py-1.5 rounded-md"
+          >
+            <Plus size={16} /> Add Connection
+          </button>
+        </div>
+
         <div className="flex flex-col sm:flex-row gap-4">
           <select 
             className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg py-3 px-4 focus:outline-none focus:border-emerald-500 transition-colors"
@@ -133,9 +249,16 @@ export default function AnalyticsPage() {
             </button>
           )}
         </div>
+        
+        {/* Selected connection details */}
+        {selectedConnection && connections.find(c => c.connection_id === selectedConnection) && (
+            <div className="mt-4 text-xs text-zinc-500 flex gap-4">
+                <span><strong className="text-zinc-400">ID:</strong> {selectedConnection}</span>
+                <span><strong className="text-zinc-400">Token:</strong> {connections.find(c => c.connection_id === selectedConnection).secure_token}</span>
+            </div>
+        )}
       </div>
 
-      {/* Security Flow Chart */}
       <AnimatePresence>
         {isConnected && (
           <motion.div
@@ -143,69 +266,138 @@ export default function AnalyticsPage() {
             animate={{ opacity: 1, y: 0 }}
             className="space-y-6"
           >
-            <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               
-              {/* Metrics */}
-              <div className="lg:col-span-1 space-y-4">
-                <div className="bg-zinc-900/60 border border-zinc-800 p-5 rounded-xl">
-                  <h3 className="text-zinc-400 text-sm mb-1">Active Sessions</h3>
-                  <p className="text-2xl font-bold">{metrics.active_sessions}</p>
-                </div>
-                <div className="bg-zinc-900/60 border border-zinc-800 p-5 rounded-xl">
-                  <h3 className="text-zinc-400 text-sm mb-1">Traffic Rate</h3>
-                  <p className="text-2xl font-bold">{metrics.traffic_rate}</p>
-                </div>
-                <div className={`border p-5 rounded-xl ${hasAnomalies ? 'bg-red-900/20 border-red-800/50' : 'bg-emerald-900/20 border-emerald-800/50'}`}>
-                  <h3 className="text-zinc-400 text-sm mb-1">Threat Level</h3>
-                  <p className={`text-2xl font-bold ${hasAnomalies ? 'text-red-400' : 'text-emerald-400'}`}>{metrics.threat_level}</p>
-                </div>
-              </div>
-
-              {/* Flow Visualization */}
-              <div className="lg:col-span-3 bg-zinc-900/80 border border-zinc-800 rounded-xl p-6 shadow-xl relative overflow-hidden">
-                <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-emerald-500 via-blue-500 to-emerald-500 opacity-50"></div>
-                <h3 className="text-xl font-semibold mb-6 flex items-center gap-2">
-                  <Activity className="w-5 h-5 text-emerald-400" />
-                  Live Security Flow Function
+              {/* Waveform Chart */}
+              <div className="lg:col-span-2 bg-zinc-900/80 border border-zinc-800 rounded-xl p-6 shadow-xl">
+                <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                  <Activity className="text-emerald-400 w-5 h-5" />
+                  Live Activity Waveform (Anomaly Score)
                 </h3>
-                
-                <div className="flex justify-between items-center px-4 mb-8">
-                  <div className="text-center"><div className="w-12 h-12 rounded-full bg-blue-900/50 border border-blue-500 flex items-center justify-center mx-auto mb-2"><Globe size={20} className="text-blue-400"/></div><span className="text-xs">Ingress</span></div>
-                  <div className="flex-1 h-px bg-zinc-800 mx-2 relative"><div className="absolute inset-0 bg-blue-500/50 w-full animate-pulse"></div></div>
-                  <div className="text-center"><div className="w-12 h-12 rounded-full bg-indigo-900/50 border border-indigo-500 flex items-center justify-center mx-auto mb-2"><Server size={20} className="text-indigo-400"/></div><span className="text-xs">Detection</span></div>
-                  <div className="flex-1 h-px bg-zinc-800 mx-2"></div>
-                  <div className="text-center"><div className="w-12 h-12 rounded-full bg-purple-900/50 border border-purple-500 flex items-center justify-center mx-auto mb-2"><ShieldCheck size={20} className="text-purple-400"/></div><span className="text-xs">Asset Memory</span></div>
-                  <div className="flex-1 h-px bg-zinc-800 mx-2"></div>
-                  <div className="text-center"><div className="w-12 h-12 rounded-full bg-emerald-900/50 border border-emerald-500 flex items-center justify-center mx-auto mb-2"><CheckCircle2 size={20} className="text-emerald-400"/></div><span className="text-xs">Resolution</span></div>
-                </div>
-
-                <div className="space-y-3 h-[250px] overflow-y-auto pr-2 custom-scrollbar">
-                  {flowEvents.map((evt, idx) => (
-                    <div key={idx} className="bg-zinc-950/80 border border-zinc-800 rounded-lg p-3 flex justify-between items-center text-sm">
-                      <div className="flex items-center gap-3">
-                        <span className="text-zinc-500">{new Date().toLocaleTimeString()}</span>
-                        <span className="text-emerald-400 font-medium">[{evt.source}]</span>
-                        <span>{evt.event}</span>
-                      </div>
-                      <span className={`px-2 py-1 rounded text-xs font-semibold ${
-                        evt.status === 'Blocked' ? 'bg-red-500/20 text-red-400' :
-                        evt.status === 'Logged' ? 'bg-blue-500/20 text-blue-400' :
-                        'bg-emerald-500/20 text-emerald-400'
-                      }`}>
-                        {evt.status}
-                      </span>
-                    </div>
-                  ))}
-                  {flowEvents.length === 0 && (
-                    <div className="text-center text-zinc-500 py-10 flex flex-col items-center gap-2">
-                       <div className="w-6 h-6 border-2 border-zinc-700 border-t-zinc-400 rounded-full animate-spin" />
-                       Waiting for traffic...
-                    </div>
-                  )}
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={chartData}>
+                      <defs>
+                        <linearGradient id="scoreGradient" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#10b981" stopOpacity={0.8} />
+                          <stop offset="95%" stopColor="#1e293b" stopOpacity={0.2} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+                      <XAxis dataKey="time" stroke="#888" tick={{fontSize:12}} />
+                      <YAxis domain={[0,100]} stroke="#888" tick={{fontSize:12}} />
+                      <Tooltip contentStyle={{backgroundColor:'#18181b',borderColor:'#27272a'}} />
+                      <ReferenceLine y={25} stroke="#34d399" strokeDasharray="3 3" label={{ position: 'top', value: 'Low', fill: '#34d399', fontSize: 12 }} />
+                      <ReferenceLine y={50} stroke="#fbbf24" strokeDasharray="3 3" label={{ position: 'top', value: 'Medium', fill: '#fbbf24', fontSize: 12 }} />
+                      <ReferenceLine y={75} stroke="#fb923c" strokeDasharray="3 3" label={{ position: 'top', value: 'High', fill: '#fb923c', fontSize: 12 }} />
+                      <ReferenceLine y={60} stroke="#f59e0b" strokeDasharray="3 3" label={{ position: 'top', value: 'Suspicious', fill: '#f59e0b', fontSize: 12 }} />
+                      <ReferenceLine y={80} stroke="#ef4444" strokeDasharray="3 3" label={{ position: 'top', value: 'Critical', fill: '#ef4444', fontSize: 12 }} />
+                      <ReferenceArea y1={0} y2={25} fill="#10b981" fillOpacity={0.1} />
+                      <ReferenceArea y1={25} y2={60} fill="#f59e0b" fillOpacity={0.1} />
+                      <ReferenceArea y1={60} y2={100} fill="#ef4444" fillOpacity={0.1} />
+                      <Area type="monotone" dataKey="score" stroke={false} fill="url(#scoreGradient)" />
+                      <Line type="monotone" dataKey="score" stroke={getRiskHex(chartData[chartData.length - 1]?.risk_band || 'LOW')} strokeWidth={2} dot={<CustomDot />} activeDot={{ r: 6 }} isAnimationActive={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
                 </div>
               </div>
+
+              {/* Risk Panel & AI Fault */}
+              <div className="lg:col-span-1 space-y-6">
+                <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl p-6 shadow-xl">
+                   <h3 className="text-lg font-semibold mb-4">Current Risk Level</h3>
+                   {securityEvents.length > 0 ? (
+                       <div className="text-center">
+                           <div className={`text-5xl font-bold mb-2 ${getRiskColor(securityEvents[0].risk_band)}`}>
+                               {securityEvents[0].anomaly_score}
+                           </div>
+                           <div className={`inline-block px-3 py-1 rounded text-sm font-semibold ${getRiskBg(securityEvents[0].risk_band)} ${getRiskColor(securityEvents[0].risk_band)}`}>
+                               {securityEvents[0].risk_band}
+                           </div>
+                       </div>
+                   ) : (
+                       <div className="text-center text-zinc-500 py-4">Waiting for data...</div>
+                   )}
+                </div>
+
+                <AnimatePresence>
+                    {faultExplanation && (
+                        <motion.div 
+                            initial={{ opacity: 0, scale: 0.95 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            className="bg-red-950/40 border border-red-900 rounded-xl p-6 shadow-xl"
+                        >
+                            <h3 className="text-lg font-semibold text-red-400 mb-3 flex items-center gap-2">
+                                <AlertCircle className="w-5 h-5" />
+                                AI Copilot Fault Analysis
+                            </h3>
+                            <div className="text-sm text-red-200 mb-4 whitespace-pre-wrap">
+                                {faultExplanation.explanation}
+                            </div>
+                            <h4 className="font-semibold text-red-300 mb-2 text-sm">Recommended Actions:</h4>
+                            <ul className="list-disc pl-5 text-xs text-red-200/80 space-y-1">
+                                {faultExplanation.recommended_actions?.map((action: string, i: number) => (
+                                    <li key={i}>{action}</li>
+                                ))}
+                            </ul>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+              </div>
+
             </div>
 
+            {/* Live Event Feed */}
+            <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl p-6 shadow-xl">
+              <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                <RefreshCw className="w-5 h-5 text-emerald-400" />
+                Live Event Feed
+              </h3>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm text-left">
+                  <thead className="text-xs text-zinc-400 uppercase bg-zinc-800/50">
+                    <tr>
+                      <th className="px-4 py-3">Timestamp</th>
+                      <th className="px-4 py-3">Event Type</th>
+                      <th className="px-4 py-3">User</th>
+                      <th className="px-4 py-3">Source IP</th>
+                      <th className="px-4 py-3">Score</th>
+                      <th className="px-4 py-3">Risk</th>
+                      <th className="px-4 py-3">Detections</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {securityEvents.map((evt, idx) => (
+                      <tr key={idx} className="border-b border-zinc-800 hover:bg-zinc-800/30">
+                        <td className="px-4 py-3 text-zinc-400 whitespace-nowrap">
+                            {new Date(evt.timestamp).toLocaleTimeString()}
+                        </td>
+                        <td className="px-4 py-3 font-medium text-zinc-200">{evt.event_type}</td>
+                        <td className="px-4 py-3 text-zinc-400">{evt.user_id}</td>
+                        <td className="px-4 py-3 text-zinc-400">{evt.source_ip}</td>
+                        <td className="px-4 py-3 font-mono">{evt.anomaly_score.toFixed(1)}</td>
+                        <td className="px-4 py-3">
+                            <span className={`px-2 py-1 rounded text-xs font-semibold ${getRiskBg(evt.risk_band)} ${getRiskColor(evt.risk_band)}`}>
+                                {evt.risk_band}
+                            </span>
+                        </td>
+                        <td className="px-4 py-3 text-xs text-red-400 max-w-[200px] truncate">
+                            {evt.detections?.join(", ")}
+                        </td>
+                      </tr>
+                    ))}
+                    {securityEvents.length === 0 && (
+                      <tr>
+                        <td colSpan={7} className="px-4 py-8 text-center text-zinc-500">
+                          Listening for incoming security events...
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            
             {/* Incident Mitigation & Block Action */}
             <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl p-6 shadow-xl relative overflow-hidden">
                {blockTimer !== null && blockTimer > 0 && (
@@ -223,7 +415,7 @@ export default function AnalyticsPage() {
                <div className="flex justify-between items-center mb-6">
                  <h3 className="text-xl font-semibold flex items-center gap-2">
                    <ShieldAlert className="w-5 h-5 text-amber-400" />
-                   Critical Mitigations (Asset Memory)
+                   Critical Mitigations
                  </h3>
                </div>
                
@@ -244,24 +436,67 @@ export default function AnalyticsPage() {
                  </button>
                </div>
             </div>
+
           </motion.div>
         )}
       </AnimatePresence>
-      <style dangerouslySetInnerHTML={{__html: `
-        .custom-scrollbar::-webkit-scrollbar {
-          width: 6px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-track {
-          background: rgba(24, 24, 27, 0.5); 
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: rgba(82, 82, 91, 0.5); 
-          border-radius: 10px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          background: rgba(113, 113, 122, 0.8); 
-        }
-      `}} />
+
+      {/* Add Connection Modal */}
+      {showAddModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-zinc-900 border border-zinc-800 p-6 rounded-xl w-full max-w-md shadow-2xl">
+            <h3 className="text-xl font-semibold mb-4">Add Website Connection</h3>
+            
+            {addConnError && (
+              <div className="mb-4 p-3 bg-red-950/40 border border-red-900 rounded-md text-red-400 text-sm flex items-center gap-2">
+                <AlertCircle size={16} />
+                <span>{addConnError}</span>
+              </div>
+            )}
+            
+            <form onSubmit={handleAddConnection} className="space-y-4">
+              <div>
+                <label className="block text-sm text-zinc-400 mb-1">Customer Name</label>
+                <input 
+                  type="text" 
+                  required
+                  value={newConnData.customer_name}
+                  onChange={e => setNewConnData({...newConnData, customer_name: e.target.value})}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-white focus:outline-none focus:border-emerald-500" 
+                  placeholder="e.g. Acme Corp"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-zinc-400 mb-1">Website URL</label>
+                <input 
+                  type="url" 
+                  required
+                  value={newConnData.website_url}
+                  onChange={e => setNewConnData({...newConnData, website_url: e.target.value})}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-white focus:outline-none focus:border-emerald-500" 
+                  placeholder="https://example.com"
+                />
+              </div>
+              <div className="flex justify-end gap-3 mt-6">
+                <button 
+                  type="button" 
+                  onClick={() => setShowAddModal(false)}
+                  className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 rounded transition-colors"
+                >
+                  Cancel
+                </button>
+                <button 
+                  type="submit"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded transition-colors"
+                >
+                  {isSubmitting ? "Creating..." : "Create"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
